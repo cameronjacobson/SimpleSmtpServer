@@ -5,6 +5,7 @@ namespace SimpleSmtpServer;
 use \EventBase;
 use \EventUtil;
 use \EventListener;
+use \SimpleSmtpServer\Interfaces\MailStoreInterface;
 
 class Server
 {
@@ -12,7 +13,8 @@ class Server
 	private static $conn = array();
 	private static $established = array();
 
-	public function __construct(){
+	public function __construct(MailStoreInterface $store){
+		$this->store = $store;
 		$this->base = new EventBase();
 		$this->browserListener = new EventListener($this->base,
 			array($this, "connectionCallback"), $this->base,
@@ -29,7 +31,7 @@ class Server
 	public function connectionCallback($listener, $fd, $address, $ctx) {
 		$base = $this->base;
 		$ident = $this->getUUID();
-		self::$conn[$ident] = new ServerConnection($base, $fd, $ident);
+		self::$conn[$ident] = new ServerConnection($base, $fd, $ident, $this->store);
 	}
 
 	public static function disconnect($ident){

@@ -5,38 +5,41 @@ namespace SimpleSmtpServer;
 use \Event;
 use \EventBuffer;
 use \EventBufferEvent;
+use \SimpleSmtpServer\Interfaces\MailStoreInterface;
+use \SimpleSmtpServer\Models\Message;
 
 class ServerConnection
 {
-    private $bev, $base;
+	private $bev, $base;
 
-    public function __destruct() {
-        $this->bev->free();
-    }
+	public function __destruct() {
+		$this->bev->free();
+	}
 
-    public function __construct($base, $fd, $ident){
-        $this->base = $base;
-        $this->bev = new EventBufferEvent($base, $fd, EventBufferEvent::OPT_CLOSE_ON_FREE);
+	public function __construct($base, $fd, $ident, MailStoreInterface $store){
+		$this->store = $store;
+		$this->base = $base;
+		$this->bev = new EventBufferEvent($base, $fd, EventBufferEvent::OPT_CLOSE_ON_FREE);
 
 		$this->ident = $ident;
 		$this->lastCommand = null;
 		$this->close = false;
 		$this->state = array();
 
-        $this->bev->setCallbacks(array($this, "readCallback"), array($this,"writeCallback"),
-            array($this, "eventCallback"), NULL
-        );
+		$this->bev->setCallbacks(array($this, "readCallback"), array($this,"writeCallback"),
+			array($this, "eventCallback"), NULL
+		);
 
-        $this->bev->enable(Event::READ | Event::WRITE);
+		$this->bev->enable(Event::READ | Event::WRITE);
 
 		$this->sendLine(220, 'WELCOME');
-    }
+	}
 
-    public function readCallback($bev, $ctx) {
-        $bev->readBuffer($bev->input);
-        while($line = $bev->input->read(512)){
-            $this->buffer .= $line;
-        }
+	public function readCallback($bev, $ctx) {
+		$bev->readBuffer($bev->input);
+		while($line = $bev->input->read(512)){
+			$this->buffer .= $line;
+		}
 		switch($this->lastCommand){
 			case 'HELO':
 			case 'EHLO':
@@ -51,11 +54,10 @@ class ServerConnection
 				$this->processData();
 				break;
 		}
-    }
+	}
 
 	public function writeCallback($bev, $ctx){
 		if($this->close){
-			var_dump($this->state);
 			$this->__destruct();
 			Server::disconnect($this->ident);
 		}
@@ -111,47 +113,45 @@ class ServerConnection
 			$this->sendLine(250, 'OK');
 			$this->lastCommand = 'ENDDATA';
 			$this->state['mail'] = $this->buffer;
+			$mail = mailparse_msg_create();
+			mailparse_msg_parse($mail, $this->buffer);
+
+			$msg = new Message();
+
+			$struct = mailparse_msg_get_structure($mail); 
+
+			foreach($struct as $st) { 
+				$section = mailparse_msg_get_part($mail, $st); 
+				$info = mailparse_msg_get_part_data($section);
+
+				foreach($info as $k=>$v){
+					switch($k){
+						case 'headers':
+							$msg->headers = $v;
+							break;
+						default:
+							$msg->meta[$k] = $v;
+							break;
+					}
+				}
+			}
+			$msg->body = substr($this->buffer,$msg->meta['starting-pos-body'], $msg->meta['ending-pos-body'] - $msg->meta['starting-pos-body'] - 5);
+			$this->store->store($msg);
 			$this->buffer = '';
 		}
 	}
 
-    public function eventCallback($bev, $events, $ctx) {
-        if ($events & EventBufferEvent::ERROR) {
-        }
+	public function eventCallback($bev, $events, $ctx) {
+		if ($events & EventBufferEvent::ERROR) {
+		}
 
-        if ($events & (EventBufferEvent::EOF | EventBufferEvent::ERROR)) {
-        }
-    }
+		if ($events & (EventBufferEvent::EOF | EventBufferEvent::ERROR)) {
+		}
+	}
 
 	private function sendLine($code, $msg){
 		$output = $this->bev->output;
 		$output->add($code.' '.$msg."\r\n");
 	}
-    private function processRequest(){
-        /**
-         *  TODO:
-         *   - Read received headers for Last-Event-ID
-         */
-        $request = $this->buffer;
-        if(strpos($request, "\r\n\r\n") !== false){
-            list($headers,$body) = explode("\r\n\r\n", $request,2);
-            $headers = explode("\r\n", $headers);
-            $firstline = array_shift($headers);
-            preg_match("|^POST\s+?/([^\s]+?)\s|",$firstline,$match);
-            $clientUUID = $match[1];
-
-            $output = $this->bev->output;
-            $output->add(
-                'HTTP/1.1 200 OK'."\r\n".
-                'Date: '.gmdate('D, d M Y H:i:s').' GMT'."\r\n".
-                'Server: Server-Sent-Events 0.1'."\r\n".
-                'MIME-version: 1.0'."\r\n".
-                "Content-Type: text/plain; charset=utf-8\r\n".
-                "Content-Length: 0\r\n\r\n"
-            );
-
-            Server::sendMessage($clientUUID, $body);
-        }
-    }
 }
 
