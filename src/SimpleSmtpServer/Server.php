@@ -21,6 +21,13 @@ class Server
 			EventListener::OPT_CLOSE_ON_FREE | EventListener::OPT_REUSEABLE, -1,
 			"0.0.0.0:25"
 		);
+
+		$this->browserListener = new EventListener($this->base,
+			array($this, "sslConnectionCallback"), $this->base,
+			EventListener::OPT_CLOSE_ON_FREE | EventListener::OPT_REUSEABLE, -1,
+			"0.0.0.0:465"
+		);
+
 		$this->browserListener->setErrorCallback(array($this, "accept_error_cb"));
 	}
 
@@ -32,6 +39,12 @@ class Server
 		$base = $this->base;
 		$ident = $this->getUUID();
 		self::$conn[$ident] = new ServerConnection($base, $fd, $ident, $this->store);
+	}
+
+	public function sslConnectionCallback($listener, $fd, $address, $ctx) {
+		$base = $this->base;
+		$ident = $this->getUUID();
+		self::$conn[$ident] = new ServerConnection($base, $fd, $ident, $this->store, true);
 	}
 
 	public static function disconnect($ident){

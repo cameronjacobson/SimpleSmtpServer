@@ -6,7 +6,8 @@ class Message
 {
 	public $headers;
 	public $meta;
-	public $body;
+	public $content;
+	public $raw;
 
 	public function __construct(){
 		

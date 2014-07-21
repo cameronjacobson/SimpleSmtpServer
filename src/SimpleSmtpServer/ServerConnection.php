@@ -7,6 +7,7 @@ use \EventBuffer;
 use \EventBufferEvent;
 use \SimpleSmtpServer\Interfaces\MailStoreInterface;
 use \SimpleSmtpServer\Models\Message;
+use \EventSslContext;
 
 class ServerConnection
 {
@@ -16,15 +17,38 @@ class ServerConnection
 		$this->bev->free();
 	}
 
-	public function __construct($base, $fd, $ident, MailStoreInterface $store){
+	public function __construct($base, $fd, $ident, MailStoreInterface $store, $ssl = false){
+
+		$this->ssl = $ssl;
+
+		$this->tls_ctx = new EventSslContext(EventSslContext::TLS_SERVER_METHOD, array(
+			EventSslContext::OPT_LOCAL_CERT => dirname(dirname(__DIR__)).'/config/sample-cert.pem',
+			EventSslContext::OPT_LOCAL_PK => dirname(dirname(__DIR__)).'/config/sample-key.pem',
+			//EventSslContext::OPT_PASSPHRASE => '',
+			EventSslContext::OPT_VERIFY_PEER => false,
+			EventSslContext::OPT_ALLOW_SELF_SIGNED => true,
+			EventSslContext::OPT_CIPHERS => 'HIGH'
+		));
+
 		$this->store = $store;
 		$this->base = $base;
+
 		$this->bev = new EventBufferEvent($base, $fd, EventBufferEvent::OPT_CLOSE_ON_FREE);
 
 		$this->ident = $ident;
 		$this->lastCommand = null;
 		$this->close = false;
 		$this->state = array();
+
+		if($ssl){
+			$this->bev = EventBufferEvent::sslFilter(
+				$this->base,
+				$this->bev,
+				$this->tls_ctx,
+				EventBufferEvent::SSL_ACCEPTING,
+				EventBufferEvent::OPT_CLOSE_ON_FREE
+			);
+		}
 
 		$this->bev->setCallbacks(array($this, "readCallback"), array($this,"writeCallback"),
 			array($this, "eventCallback"), NULL
@@ -46,6 +70,7 @@ class ServerConnection
 			case 'MAIL':
 			case 'RCPT':
 			case 'ENDDATA':
+			case 'STARTTLS':
 			default:
 				$command = $this->extractCommand();
 				$this->processCommand($command);
@@ -76,7 +101,12 @@ class ServerConnection
 				$this->sendLine(250, 'HELO');
 				break;
 			case 'EHLO':
-				$this->sendLine(250, 'EHLO');
+//				$this->sendLine(250, 'EHLO');
+				$this->sendCapability(250, '8BITMIME');
+				if(!$this->ssl){
+					$this->sendCapability(250, 'STARTTLS');
+				}
+				$this->sendLine(250, 'OK');
 				break;
 			case 'QUIT':
 				$this->sendLine(221, '');
@@ -97,12 +127,41 @@ class ServerConnection
 				$this->sendLine(250, 'OK');
 				$this->state = array();
 				break;
+			case 'NOOP':
+				$this->sendLine(250, 'OK');
+				break;
 			case 'VRFY':
-				$this->sendLine(550, '');
+				$this->sendLine(421, '');
 				$this->close = true;
 				break;
+			case 'STARTTLS':
+				$this->sendLine(220, 'Go Ahead');
+
+				$this->bev = EventBufferEvent::sslFilter(
+					$this->base,
+					$this->bev,
+					$this->tls_ctx,
+					EventBufferEvent::SSL_ACCEPTING,
+					EventBufferEvent::OPT_CLOSE_ON_FREE
+				);
+				$this->bev->setCallbacks(array($this, "readCallback"), array($this,"writeCallback"),
+					array($this, "eventCallback"), NULL
+				);
+
+				$this->bev->enable(Event::READ | Event::WRITE);
+				$this->state = array();
+				$this->ssl = true;
+				break;
 			case 'EXPN':
-				$this->sendLine(550, '');
+				$this->sendLine(421, '');
+				$this->close = true;
+				break;
+			case 'HELP':
+				$this->sendLine(421, '');
+				$this->close = true;
+				break;
+			default:
+				$this->sendLine(421, 'Unrecognized Command');
 				$this->close = true;
 				break;
 		}
@@ -112,37 +171,44 @@ class ServerConnection
 		if(substr($this->buffer, -5) === "\r\n.\r\n"){
 			$this->sendLine(250, 'OK');
 			$this->lastCommand = 'ENDDATA';
-			$this->state['mail'] = $this->buffer;
 			$mail = mailparse_msg_create();
 			mailparse_msg_parse($mail, $this->buffer);
 
 			$msg = new Message();
+			$msg->meta = array();
+			$msg->headers = array();
+			$msg->content = array();
 
 			$struct = mailparse_msg_get_structure($mail); 
-
-			foreach($struct as $st) { 
-				$section = mailparse_msg_get_part($mail, $st); 
+			foreach($struct as $st) {
+				$section = mailparse_msg_get_part($mail, $st);
 				$info = mailparse_msg_get_part_data($section);
+				$msg->headers[] = $info['headers'];
+				unset($info['headers']);
+				$msg->meta[] = $info;
+				$body = substr($this->buffer, $info['starting-pos-body'], $info['ending-pos-body']-$info['starting-pos-body']);
 
-				foreach($info as $k=>$v){
-					switch($k){
-						case 'headers':
-							$msg->headers = $v;
-							break;
-						default:
-							$msg->meta[$k] = $v;
-							break;
-					}
+				if(count($struct) > 1){
+					$msg->content[] = count($msg->meta) == 1 ? '' : trim(preg_replace("|\.\r\n$|","",$body));
+				}
+				else{
+					$msg->content[] = trim(preg_replace("|\.\r\n$|","",$body));
 				}
 			}
-			$msg->body = substr($this->buffer,$msg->meta['starting-pos-body'], $msg->meta['ending-pos-body'] - $msg->meta['starting-pos-body'] - 5);
+
+			$msg->raw = $this->buffer;
+
 			$this->store->store($msg);
 			$this->buffer = '';
 		}
 	}
 
 	public function eventCallback($bev, $events, $ctx) {
+
 		if ($events & EventBufferEvent::ERROR) {
+			while ($err = $bev->sslError()) {
+				fprintf(STDERR, "Bufferevent error %s.\n", $err);
+			}
 		}
 
 		if ($events & (EventBufferEvent::EOF | EventBufferEvent::ERROR)) {
@@ -152,6 +218,10 @@ class ServerConnection
 	private function sendLine($code, $msg){
 		$output = $this->bev->output;
 		$output->add($code.' '.$msg."\r\n");
+	}
+	private function sendCapability($code, $msg){
+		$output = $this->bev->output;
+		$output->add($code.'-'.$msg."\r\n");
 	}
 }
 
