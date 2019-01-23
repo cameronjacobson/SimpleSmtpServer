@@ -1,6 +1,10 @@
 {
     "name":"smtp/smtp",
     "repositories": [
+        {
+            "type":"git",
+            "url":"https://github.com/cameronjacobson/SimpleHttpClient.git"
+        },
         {   
             "type":"git",
             "url":"https://github.com/cameronjacobson/Phixd.git"
@@ -15,9 +19,9 @@
         }
     ],
     "require": {
-        "php": ">=5.4.0",
+        "php": "<7",
         "ext-event": "*",
-        "ext-mailparse": "*",
+        "ext-mailparse": "<3",
         "swiftmailer/swiftmailer": "5.*@dev",
         "phreezer/phreezer": "@dev",
 		"datashovel/simplehttpclient": "@dev",
